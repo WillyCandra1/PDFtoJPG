@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 try:
-    import fitz  # PyMuPDF
+    import fitz  
 except ImportError:
     sys.stderr.write("Error: PyMuPDF not installed.  pip install PyMuPDF\n")
     sys.exit(1)
@@ -18,9 +18,9 @@ except ImportError:
     sys.exit(1)
 
 
-# ---------------------------------------------------------------------------
+# --------------------
 # Configuration
-# ---------------------------------------------------------------------------
+# --------------------
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,9 +40,55 @@ class PDFConversionError(Exception):
     """Raised when a PDF cannot be converted."""
 
 
-# ---------------------------------------------------------------------------
-# Discovery
-# ---------------------------------------------------------------------------
+# ---------------------
+# File picker (GUI)
+# ---------------------
+
+def pick_pdf_files() -> list[Path]:
+    """Open a native file-picker dialog. Returns [] if the user cancels."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError:
+        logger.error("tkinter is not available in this Python install.")
+        return []
+
+    root = tk.Tk()
+    root.withdraw()                    # hide the empty root window
+    root.attributes("-topmost", True)  # bring dialog to front on all OSes
+
+    selected = filedialog.askopenfilenames(
+        title="Select PDF file(s) to convert",
+        filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+    )
+    root.destroy()
+    return [Path(p) for p in selected]
+
+
+def pick_output_dir(initial_dir: Path | None = None) -> Path | None:
+    """Open a folder-picker. Returns None if the user cancels."""
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError:
+        return None
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+
+    selected = filedialog.askdirectory(
+        title="Select output folder (Cancel = save next to PDF)",
+        initialdir=str(initial_dir) if initial_dir else None,
+        mustexist=False,
+    )
+    root.destroy()
+    return Path(selected) if selected else None
+
+
+# -------------------------------------
+# Discovery (for CLI directory input)
+# -------------------------------------
 
 def find_pdfs(path: Path, recursive: bool = False) -> list[Path]:
     """Return a sorted list of PDF files at the given path."""
@@ -61,9 +107,9 @@ def find_pdfs(path: Path, recursive: bool = False) -> list[Path]:
     raise FileNotFoundError(f"Path does not exist: {path}")
 
 
-# ---------------------------------------------------------------------------
+# ---------------------------
 # Core conversion
-# ---------------------------------------------------------------------------
+# ---------------------------
 
 def convert_pdf_to_jpg(
     pdf_path: Path,
@@ -73,21 +119,7 @@ def convert_pdf_to_jpg(
     password: str | None = None,
     page_range: tuple[int, int] | None = None,
 ) -> list[Path]:
-    """
-    Convert a single PDF to JPG image(s), one per page.
-
-    Args:
-        pdf_path:    Path to the PDF file.
-        output_dir:  Directory to save JPGs (created if missing).
-        dpi:         Render resolution. Higher = sharper + larger file.
-        quality:     JPG compression quality (1-100).
-        password:    Password for encrypted PDFs.
-        page_range:  Optional (start, end) inclusive, 1-indexed. None = all.
-
-    Returns:
-        List of paths to the generated JPG files.
-    """
-    # --- Validation --------------------------------------------------------
+    """Convert a single PDF to JPG image(s), one per page."""
     if not pdf_path.exists():
         raise FileNotFoundError(f"PDF not found: {pdf_path}")
     if not (MIN_DPI <= dpi <= MAX_DPI):
@@ -101,13 +133,11 @@ def convert_pdf_to_jpg(
     generated: list[Path] = []
 
     try:
-        # --- Open PDF ------------------------------------------------------
         try:
             doc = fitz.open(pdf_path)
         except Exception as exc:
             raise PDFConversionError(f"Could not open '{pdf_path.name}': {exc}") from exc
 
-        # --- Decrypt if needed --------------------------------------------
         if doc.is_encrypted:
             if password is None:
                 raise PDFConversionError(
@@ -120,7 +150,6 @@ def convert_pdf_to_jpg(
         if total_pages == 0:
             raise PDFConversionError(f"'{pdf_path.name}' has no pages.")
 
-        # --- Resolve page range -------------------------------------------
         if page_range is not None:
             start = max(1, page_range[0])
             end = min(total_pages, page_range[1])
@@ -130,10 +159,9 @@ def convert_pdf_to_jpg(
         else:
             page_indices = range(total_pages)
 
-        # --- Render settings ----------------------------------------------
-        zoom = dpi / 72.0  
+        zoom = dpi / 72.0  # PDF user-space is 72 DPI
         matrix = fitz.Matrix(zoom, zoom)
-        pad = max(3, len(str(total_pages)))  
+        pad = max(3, len(str(total_pages)))
         stem = pdf_path.stem
 
         logger.info(
@@ -144,11 +172,10 @@ def convert_pdf_to_jpg(
             dpi,
         )
 
-        # --- Render each page ---------------------------------------------
         for page_idx in page_indices:
             try:
                 page = doc.load_page(page_idx)
-
+                # JPG can't store alpha or CMYK — flatten to RGB on white.
                 pix = page.get_pixmap(
                     matrix=matrix,
                     alpha=False,
@@ -172,7 +199,7 @@ def convert_pdf_to_jpg(
 
             except Exception as exc:
                 logger.error("  page %d failed: %s", page_idx + 1, exc)
-                continue 
+                continue
 
         if not generated:
             raise PDFConversionError(f"No pages converted from '{pdf_path.name}'.")
@@ -190,9 +217,9 @@ def convert_pdf_to_jpg(
             doc.close()
 
 
-# ---------------------------------------------------------------------------
+# -------------------------------
 # CLI
-# ---------------------------------------------------------------------------
+# -------------------------------
 
 def parse_page_range(value: str) -> tuple[int, int]:
     """Parse '1-5' or '3' into (start, end)."""
@@ -215,17 +242,20 @@ def parse_page_range(value: str) -> tuple[int, int]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Convert PDF files to JPG images (one image per page).",
+        description="Convert PDF files to JPG images (one image per page). "
+                    "Run with no input argument to open a file-picker dialog.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
+            "  python pdf_to_jpg.py                         # file picker\n"
             "  python pdf_to_jpg.py document.pdf\n"
             "  python pdf_to_jpg.py document.pdf -o out/ -d 300 -q 95\n"
             "  python pdf_to_jpg.py document.pdf --pages 1-5\n"
             "  python pdf_to_jpg.py pdfs/ --recursive\n"
         ),
     )
-    p.add_argument("input", type=Path, help="PDF file or directory containing PDFs")
+    p.add_argument("input", type=Path, nargs="?", default=None,
+                   help="PDF file or directory. Omit to open a file-picker.")
     p.add_argument("-o", "--output", type=Path, default=None,
                    help="Output directory (default: <stem>_images next to the PDF)")
     p.add_argument("-d", "--dpi", type=int, default=DEFAULT_DPI,
@@ -238,8 +268,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Page range, e.g. '1-5' or '3' (default: all)")
     p.add_argument("--recursive", action="store_true",
                    help="Recurse into subdirectories (when input is a directory)")
+    p.add_argument("--no-picker", action="store_true",
+                   help="Disable the GUI file-picker fallback.")
+    p.add_argument("--pick-output", action="store_true",
+                   help="Also open a folder-picker for the output directory.")
     p.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
     return p
+
+
+def _pause_if_interactive(picker_mode: bool) -> None:
+    """Keep the console open when the user double-clicked the script."""
+    if not picker_mode:
+        return
+    try:
+        input("\nPress Enter to exit ...")
+    except (EOFError, KeyboardInterrupt):
+        pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -247,17 +291,38 @@ def main(argv: list[str] | None = None) -> int:
     if args.verbose:
         logger.setLevel(logging.DEBUG)
 
+    picker_mode = args.input is None and not args.no_picker
+
+    # Resolve input
     try:
-        pdfs = find_pdfs(args.input.expanduser().resolve(), args.recursive)
+        if args.input is not None:
+            pdfs = find_pdfs(args.input.expanduser().resolve(), args.recursive)
+        elif picker_mode:
+            logger.info("Opening file picker ...")
+            picked = pick_pdf_files()
+            if not picked:
+                logger.info("No file selected. Exiting.")
+                _pause_if_interactive(picker_mode)
+                return 0
+            pdfs = [p.expanduser().resolve() for p in picked]
+        else:
+            logger.error("No input provided and --no-picker is set.")
+            return 1
     except (FileNotFoundError, ValueError) as exc:
         logger.error(str(exc))
+        _pause_if_interactive(picker_mode)
         return 1
 
-    success, failure = 0, 0
+    # Resolve the output directory
+    picked_output: Path | None = args.output
+    if picked_output is None and args.pick_output:
+        picked_output = pick_output_dir(initial_dir=pdfs[0].parent)
 
+    # Convert
+    success, failure = 0, 0
     for pdf_path in pdfs:
-        if args.output is not None:
-            out_dir = args.output.expanduser().resolve()
+        if picked_output is not None:
+            out_dir = picked_output.expanduser().resolve()
             if len(pdfs) > 1:
                 out_dir = out_dir / pdf_path.stem
         else:
@@ -283,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
     if success + failure > 1:
         logger.info("Done: %d succeeded, %d failed.", success, failure)
 
+    _pause_if_interactive(picker_mode)
     return 0 if failure == 0 else 2
 
 
